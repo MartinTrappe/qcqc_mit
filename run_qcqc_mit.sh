@@ -43,7 +43,7 @@ pip install --upgrade pip
 # 4) Install required packages via pip
 # These packages will not conflict with system-level packages
 echo "→ Installing required Python packages via pip…"
-pip install qibochem matplotlib
+pip install qibochem matplotlib qibojit
 
 # 5) Run the Quantum Chemistry project, e.g. H2_dissociation
 echo "→ Running quantum chemistry simulation: qcqc_mit.py"

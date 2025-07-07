@@ -51,6 +51,21 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 import multiprocessing as mp
 
+
+USE_QIBOJIT = True  # default: True; set to False for numpy backend
+from qibo import set_backend, get_backend
+if USE_QIBOJIT:
+    set_backend("qibojit") # for CPU
+    #set_backend("qibojit", platform="gpu")  # if using CuPy/CUDA
+else:
+    set_backend("numpy")
+from qibo import get_backend
+backend = get_backend()
+print(f"\n → Qibo backend = {backend.name}, platform = {backend.platform}\n")
+import logging
+logging.getLogger("qibo").setLevel(logging.DEBUG)
+
+
 # ============================
 # ===== BEGIN USER INPUT =====
 # ============================
@@ -69,7 +84,7 @@ NPTS_LIST = [1,1,1,1,1,1,1,1,1,1]
 # Quantum chemistry and quantum circuit parameters
 BASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g {0.03sec/iter} -- 6-31g(d,p) {>3000sec/iter} -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
 FCIBASIS = "6-31g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
-CCSDTBASIS = "6-31g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
+CCSDTBASIS = FCIBASIS  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
 ANSATZ = "UCCSD"  # "STD": (layered) hardware-efficient ansatz -- "UCCSD": chemically motivated unitary CC
 ANSATZPARAMS = 1 # For STD: number of layers -- For UCCSD: Number of Trotter steps in operator splitting --
 INITAMPLITUDES = "HF"  # Initial guess: "RAND", "HF", or "MP2" (if UCCSD)
@@ -267,7 +282,7 @@ def compute_energy(raw_d, init_params=None):
             init_params = np.random.uniform(0, 2 * np.pi, nparams)
     # Define the objective: expectation value of H at params
     def vqe_objective(params):
-        # returns a Python float
+        # returns a Python float; backend uses state vectors (since no density matrix is explicitly passed and no noise is simulated)
         circ.set_parameters(params)
         return expectation(circ, H)
 
