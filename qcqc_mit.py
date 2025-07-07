@@ -26,6 +26,42 @@ See the “BEGIN USER INPUT” / “END USER INPUT” section below to configure
 """
 
 
+
+# ============================
+# ===== BEGIN USER INPUT =====
+# ============================
+PROJECT = "H2_dissociation" # Project name
+USE_QIBOJIT = False  # default: True; set to False for numpy backend
+DEBUG = True # False -- True
+MINIMAL_EXAMPLE = True # Minimal example for gauing computing time
+THREADS = 1 # os.cpu_count()  # Parallel processes
+# Units and geometry sampling
+UNITS = 2        # 0: {Ha, Å} -- 1: {eV, Bohr} -- 2: {Ha, Bohr} -- 3: {eV, Å}
+xStart = 0.5     # Starting H–H distance (in chosen length units)
+xEnd   = 8     # Ending   H–H distance
+# breakpoints must start with xStart and end with xEnd:
+xPoints = [xStart, 0.8, 1.3, 1.39, 1.41, 1.5, 2.0, 2.75, 4.0, 6.0, xEnd]
+# number of distances in each interval [xPoints[i], xPoints[i+1]] (summming to total number NPTS of bond-length points):
+#NPTS_LIST = [10,10,10,10,10,10,10,10,10,10]
+NPTS_LIST = [1,1,1,1,1,1,1,1,1,1]
+# Quantum chemistry and quantum circuit parameters
+BASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g {0.03sec/iter} -- 6-31g(d,p) {>3000sec/iter} -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
+FCIBASIS = "6-31g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
+CCSDTBASIS = "6-31g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
+ANSATZ = "UCCSD"  # "STD": (layered) hardware-efficient ansatz -- "UCCSD": chemically motivated unitary CC
+ANSATZPARAMS = 1 # For STD: number of layers -- For UCCSD: Number of Trotter steps in operator splitting --
+INITAMPLITUDES = "HF"  # Initial guess: "RAND", "HF", or "MP2" (if UCCSD)
+# Classical optimization parameters
+OPTIMIZER = "BFGS"   # Classical scipy optimizer: CG -- COBYLA -- BFGS -- Nelder-Mead -- Powell --
+TOLERANCE = 1e-2 # energy change convergence tolerance for classical optimizer
+MAXITER = 1000 # maximum number of iterations for classical optimizer
+REPEAT = 10 # select the best result from REPEAT classical optimizer runs
+# ==========================
+# ===== END USER INPUT =====
+# ==========================
+
+
+
 import os
 # Force all BLAS/MKL/OpenBLAS backends to a single thread to avoid oversubscription
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -41,9 +77,9 @@ import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 from pyscf import lib, gto, scf, fci ,cc
 from qibochem.driver import Molecule  # Quantum chemistry driver: builds molecule & integrals via PySCF
-from qibo import gates, Circuit # Qibo: quantum computing framework
+from qibo import set_backend, get_backend, gates, Circuit # Qibo: quantum computing framework
 from qibo.models import VQE # Variational Quantum Eigensolver model
-from qibochem.ansatz.ucc import ucc_ansatz  # Unitary Coupled Cluster ansatz builder
+from qibochem.ansatz.ucc import ucc_ansatz, hf_circuit, ucc_circuit  # Unitary Coupled Cluster ansatz builder, etc.
 from qibochem.measurement.result import expectation
 from qibo.ui import plot_circuit
 
@@ -51,9 +87,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 import multiprocessing as mp
 
-
-USE_QIBOJIT = True  # default: True; set to False for numpy backend
-from qibo import set_backend, get_backend
 if USE_QIBOJIT:
     set_backend("qibojit") # for CPU
     #set_backend("qibojit", platform="gpu")  # if using CuPy/CUDA
@@ -64,38 +97,6 @@ backend = get_backend()
 print(f"\n → Qibo backend = {backend.name}, platform = {backend.platform}\n")
 import logging
 logging.getLogger("qibo").setLevel(logging.DEBUG)
-
-
-# ============================
-# ===== BEGIN USER INPUT =====
-# ============================
-PROJECT = "H2_dissociation" # Project name
-DEBUG = True # False -- True
-THREADS = 1 # os.cpu_count()  # Parallel processes
-# Units and geometry sampling
-UNITS = 2        # 0: {Ha, Å} -- 1: {eV, Bohr} -- 2: {Ha, Bohr} -- 3: {eV, Å}
-xStart = 0.5     # Starting H–H distance (in chosen length units)
-xEnd   = 8     # Ending   H–H distance
-# breakpoints must start with xStart and end with xEnd:
-xPoints = [xStart, 0.8, 1.3, 1.39, 1.41, 1.5, 2.0, 2.75, 4.0, 6.0, xEnd]
-# number of distances in each interval [xPoints[i], xPoints[i+1]] (summming to total number NPTS of bond-length points):
-#NPTS_LIST = [10,10,10,10,10,10,10,10,10,10]
-NPTS_LIST = [1,1,1,1,1,1,1,1,1,1]
-# Quantum chemistry and quantum circuit parameters
-BASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g {0.03sec/iter} -- 6-31g(d,p) {>3000sec/iter} -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
-FCIBASIS = "6-31g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
-CCSDTBASIS = FCIBASIS  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
-ANSATZ = "UCCSD"  # "STD": (layered) hardware-efficient ansatz -- "UCCSD": chemically motivated unitary CC
-ANSATZPARAMS = 1 # For STD: number of layers -- For UCCSD: Number of Trotter steps in operator splitting --
-INITAMPLITUDES = "HF"  # Initial guess: "RAND", "HF", or "MP2" (if UCCSD)
-# Classical optimization parameters
-OPTIMIZER = "BFGS"   # Classical scipy optimizer: CG -- COBYLA -- BFGS -- Nelder-Mead -- Powell --
-TOLERANCE = 1e-2 # energy change convergence tolerance for classical optimizer
-MAXITER = 1000 # maximum number of iterations for classical optimizer
-REPEAT = 10 # select the best result from REPEAT classical optimizer runs
-# ==========================
-# ===== END USER INPUT =====
-# ==========================
 
 
 class Tee(object):
@@ -118,15 +119,18 @@ def SleepForever():
     except KeyboardInterrupt:
         print("\nInterrupted by user, exiting.")
 
+
 # ── freeze timestamp for parent + children ──
 if "QUANTCHEM_TS" not in os.environ:
     os.environ["QUANTCHEM_TS"] = datetime.now().strftime("%Y%m%d_%H%M%S")
 timestamp = os.environ["QUANTCHEM_TS"]
 
+
 # ensure our data/ directory exists
 script_dir = os.path.dirname(os.path.realpath(__file__))
 data_dir   = os.path.join(script_dir, "data")
 os.makedirs(data_dir, exist_ok=True)
+
 
 # ——— universal Tee (for parent + all children) ———
 log_path = os.path.join(data_dir, f"qcqc_{PROJECT}_{timestamp}.log")
@@ -136,6 +140,57 @@ sys.stdout = Tee(sys.__stdout__, log_file)
 sys.stderr = sys.stdout
 
 # --- Post-Process user input ---
+
+if MINIMAL_EXAMPLE:
+    print("start MINIMAL EXAMPLE for gauging computing time")
+
+    # --- Molecule setup: H₂ with accurate basis, e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
+    DISTANCE = 0.7
+    h2 = Molecule([('H', (0.0, 0.0, 0.0)), ('H', (0.0, 0.0, DISTANCE))], basis=BASIS)
+    h2.run_pyscf()
+    hamiltonian = h2.hamiltonian()
+
+    # --- UCC ansatz: HF reference + full excitations
+    print(f"→ Spin orbitals: {h2.nso}, electrons: {h2.nelec}")
+    circuit = hf_circuit(h2.nso, h2.nelec)
+    circuit += ucc_circuit(h2.nso, list(range(h2.nso)))
+
+    # --- VQE setup
+    vqe = VQE(circuit, hamiltonian)
+    nparams = len(circuit.get_parameters())
+    initial_parameters = np.random.uniform(0.0, 2*np.pi, nparams)
+
+    print(f"→ Circuit has {nparams} parameters")
+
+    # --- Callback for live progress updates
+    def callback(xk):
+        t0 = time.perf_counter()
+        circuit.set_parameters(xk)
+        result = circuit()
+        state = result.state()  # ← Extract raw statevector
+        energy = hamiltonian.expectation(state)
+        t1 = time.perf_counter()
+        print(f"→ Iter energy = {energy:.8f} Ha, time = {t1 - t0:.3f}s")
+        sys.stdout.flush()
+
+    # --- Minimize
+    print("→ Starting VQE optimization…")
+    t0 = time.perf_counter()
+    energy, params, extra = vqe.minimize(
+        initial_parameters,
+        method="BFGS",
+        options={"maxiter": 1000, "disp": True},
+        callback=callback
+    )
+    t1 = time.perf_counter()
+
+    # --- Results
+    print(f"\n✅ VQE ground state energy at DISTANCE={DISTANCE} in {BASIS} basis: {energy:.10f} Ha")
+    print(f"✅ Optimization time: {t1 - t0:.2f} seconds")
+
+    print(" end MINIMAL EXAMPLE for gauging computing time\n")
+
+
 if ANSATZ == "STD":
     INITAMPLITUDES = "RAND"
 # --- Unit conversion setup ---
@@ -434,9 +489,11 @@ def main():
     plt.grid(True)
     plt.tight_layout()
 
+    # === Total runtime ===
+    elapsed = time.perf_counter() - start
+    print(f"\nTotal wall-clock time: {elapsed:.2f} seconds")
     # Save figure with timestamp and parameter summary
     ANSATZstring = f"{ANSATZ}({ANSATZPARAMS})"
-    elapsed = time.perf_counter() - start
     plt.savefig(os.path.join(data_dir, f"qcqc_{PROJECT}_{timestamp}_[{xStart}-{xEnd}]({NPTS})_{ANSATZstring}_{INITAMPLITUDES}_{BASIS}_FCI={FCIBASIS}_CCSDT={CCSDTBASIS}_{OPTIMIZER}_{elapsed:.0f}sec.pdf"))
     plt.show()
 
