@@ -33,8 +33,8 @@ Email: martin.trappe@quantumlah.org
 
 ## Features
 
-- **Parallel distance sampling** (via `concurrent.futures` or `multiprocessing`)
-- **Classical optimizers**: CG, COBYLA, BFGS, Nelder-Mead, Powell
+- **Parallel execution** (sampling the distances of the dissociation curve in parallel)
+- **Classical optimizers**: BFGS, CG, COBYLA, Nelder-Mead, etc.
 - **Automatic backup** of script and logs
 - **Publication-ready plots** of HF, VQE, FCI & CCSD(T) curves
 
@@ -53,7 +53,7 @@ Email: martin.trappe@quantumlah.org
 Clone and enter repo:
 
 ```bash
-git clone https://github.com/<your-username>/qcqc_mit.git
+git clone https://github.com/MartinTrappe/qcqc_mit.git
 cd qcqc_mit
 ```
 
