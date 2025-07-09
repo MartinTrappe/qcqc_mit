@@ -37,13 +37,24 @@ echo "→ Activating '$VENV'…"
 source "$VENV/bin/activate"
 
 # 3) Upgrade pip inside the venv
-echo "→ Upgrading pip…"
-pip install --upgrade pip
+echo "→ Updating pip…"
+pip install --quiet --upgrade pip
 
 # 4) Install required packages via pip
+
+# ——— Conditionally install Qiskit[all] ———
+echo "→ Updating Qiskit…"
+if ! python -c "import qiskit" &> /dev/null; then
+  echo "→ Qiskit not found; installing Qiskit[all]…"
+  pip install --quiet "qiskit[all]"
+else
+  echo "→ Qiskit already installed; skipping."
+fi
+
+
 # These packages will not conflict with system-level packages
-echo "→ Installing required Python packages via pip…"
-pip install qibochem matplotlib qibojit
+echo "→ Updating required Python packages…"
+pip install --quiet matplotlib qibochem qibojit qiskit_ibm_runtime qiskit-aer qiskit-optimization
 
 # 5) Run the Quantum Chemistry project, e.g. H2_dissociation
 echo "→ Running quantum chemistry simulation: qcqc_mit.py"

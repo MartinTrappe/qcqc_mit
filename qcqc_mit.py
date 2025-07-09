@@ -46,9 +46,9 @@ xPoints = [xStart, 0.8, 1.3, 1.39, 1.41, 1.5, 2.0, 2.75, 4.0, 6.0, xEnd]
 NPTS_LIST = [1,1,1,1,1,1,1,1,1,1]
 # Quantum chemistry and quantum circuit parameters
 BASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g {0.03sec/iter} -- 6-31g(d,p) {>3000sec/iter} -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
-FCIBASIS = "6-31g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
-CCSDTBASIS = "6-31g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
-ANSATZ = "UCCSD"  # "STD": (layered) hardware-efficient ansatz -- "UCCSD": chemically motivated unitary CC
+FCIBASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
+CCSDTBASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
+ANSATZ = "STD"  # "STD": (layered) hardware-efficient ansatz -- "UCCSD": chemically motivated unitary CC -- "LUCJ": Local Unitary Cluster Jastrow --
 ANSATZPARAMS = 1 # For STD: number of layers -- For UCCSD: Number of Trotter steps in operator splitting --
 INITAMPLITUDES = "HF"  # Initial guess: "RAND", "HF", or "MP2" (if UCCSD)
 # Classical optimization parameters
@@ -67,13 +67,19 @@ import os
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
+import json
 import shutil
 import sys
 import time
 from datetime import datetime
 import logging
-import numpy as np
 import matplotlib.pyplot as plt
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
+import multiprocessing as mp
+
+import numpy as np
 from scipy.optimize import minimize
 from pyscf import lib, gto, scf, fci ,cc
 from qibochem.driver import Molecule  # Quantum chemistry driver: builds molecule & integrals via PySCF
@@ -83,9 +89,66 @@ from qibochem.ansatz.ucc import ucc_ansatz, hf_circuit, ucc_circuit  # Unitary C
 from qibochem.measurement.result import expectation
 from qibo.ui import plot_circuit
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from functools import partial
-import multiprocessing as mp
+
+import qiskit
+
+print("\nQiskit version:", qiskit.__version__, "\n")
+
+# 1) Import the Runtime client
+from qiskit_ibm_runtime import QiskitRuntimeService
+
+# 2) Load your IBM creds from the JSON next to this script
+cfg_path = os.path.join(os.path.dirname(__file__), "IBM_apikey.json")
+with open(cfg_path, "r") as f:
+    cfg = json.load(f)
+
+# 3) Save (once) so that QiskitRuntimeService() can auto-discover them
+home_cfg = os.path.expanduser("~/.qiskit/qiskit-ibm.json")
+if not os.path.exists(home_cfg):
+    QiskitRuntimeService.save_account(
+        channel="ibm_quantum_platform",
+        token=cfg["apikey"],
+        instance=cfg["crn"],
+        overwrite=False
+    )
+
+# 4) Instantiate the service (reads from ~/.qiskit/qiskit-ibm.json)
+service = QiskitRuntimeService()
+
+# 5) Simple check: list available backends
+all_backends = service.backends()
+hardware = [b.name for b in all_backends if not b.configuration().simulator]
+simulators = [b.name for b in all_backends if b.configuration().simulator]
+
+print("Operational hardware backends:", hardware)
+print("Available simulators:", simulators,"\n")
+
+print("Local qiskit simulator:")
+
+from qiskit import QuantumCircuit, transpile
+from qiskit_aer import AerSimulator
+
+# 1) Build your circuit (e.g. Bell)
+qc = QuantumCircuit(2)
+qc.h(0)
+qc.cx(0, 1)
+
+# 2) Add measurements
+qc.measure_all()
+
+# 3) Pick the local simulator backend
+sim = AerSimulator()
+
+# 4) Transpile to match the simulator’s expected instruction set
+qc2 = transpile(qc, sim)
+
+# 5) Run and fetch results
+job    = sim.run(qc2, shots=1024)
+result = job.result()
+print("Counts:", result.get_counts())
+
+
+
 
 if USE_QIBOJIT:
     set_backend("qibojit") # for CPU
@@ -191,8 +254,124 @@ if MINIMAL_EXAMPLE:
     print(" end MINIMAL EXAMPLE for gauging computing time\n")
 
 
+
+# def lucj_ansatz(n_qubits, n_layers=1):
+#     """
+#     Local Unitary Cluster Jastrow (LUCJ) ansatz:
+#     Alternating layers of parameterized RZZ entanglers and RY rotations.
+#     """
+#     from qibo import gates, Circuit
+#     circ = Circuit(n_qubits)
+#
+#     for l in range(n_layers):
+#         # --- Jastrow-like ZZ entanglers ---
+#         for i in range(n_qubits - 1):
+#             theta = 0.0
+#             circ.add(gates.RZZ(i, i + 1, theta=theta))
+#
+#         # --- Local RY rotations ---
+#         for i in range(n_qubits):
+#             theta = 0.0
+#             circ.add(gates.RY(i, theta=theta))
+#
+#     return circ
+
+# def lucj_ansatz(n_qubits, n_layers=1):
+#     from qibo import gates, Circuit
+#     from qibochem.ansatz.ucc import hf_circuit
+#
+#     circ = Circuit(n_qubits)
+#
+#     if INITAMPLITUDES == "HF":
+#         circ += hf_circuit(n_qubits, n_electrons=n_qubits // 2)
+#
+#     for l in range(n_layers):
+#         # --- Choose entangler type ---
+#         if l % 3 == 0:
+#             entangler = gates.RZZ
+#             name = "zz"
+#         elif l % 3 == 1:
+#             entangler = gates.RXX
+#             name = "xx"
+#         else:
+#             entangler = gates.RYY
+#             name = "yy"
+#
+#         # All-to-all entanglers
+#         for i in range(n_qubits):
+#             for j in range(i+1, n_qubits):
+#                 circ.add(entangler(i, j, theta=0.0))
+#
+#         # Single-qubit RY rotations
+#         for i in range(n_qubits):
+#             circ.add(gates.RY(i, theta=0.0))
+#
+#     return circ
+from qibo import gates, Circuit
+from qibochem.ansatz.ucc import hf_circuit
+
+def enhanced_lucj_ansatz(n_qubits, n_layers=2, include_hf=False, use_parameter_sharing=False):
+    """
+    Enhanced LUCJ ansatz:
+    - Alternating entanglers (RZZ, RXX, RYY)
+    - All-to-all connectivity per layer
+    - Optional HF reference state
+    - Optional parameter sharing across layers
+    - Placeholder SWAP layers for symmetry (fixed for now)
+
+    Args:
+        n_qubits (int): number of qubits
+        n_layers (int): number of LUCJ layers
+        include_hf (bool): whether to prepend Hartree–Fock reference circuit
+        use_parameter_sharing (bool): whether to share parameters across layers
+
+    Returns:
+        qibo.Circuit: parameterized LUCJ circuit
+    """
+    circ = Circuit(n_qubits)
+
+    if include_hf:
+        circ += hf_circuit(n_qubits, nelectrons=n_qubits // 2)
+
+    # Entangler types alternating
+    entangler_sequence = [gates.RZZ, gates.RXX, gates.RYY]
+
+    # Optional: parameter table for sharing
+    shared_params = {}
+
+    for l in range(n_layers):
+        entangler = entangler_sequence[l % len(entangler_sequence)]
+
+        # All-to-all entanglers
+        for i in range(n_qubits):
+            for j in range(i+1, n_qubits):
+                if use_parameter_sharing:
+                    key = (entangler.__name__, i, j)
+                    if key not in shared_params:
+                        shared_params[key] = 0.0
+                    theta = shared_params[key]
+                else:
+                    theta = 0.0
+                circ.add(entangler(i, j, theta=theta))
+
+        # Optional symmetry-preserving SWAPs (placeholder, unparameterized)
+        if n_qubits >= 4:
+            for i in range(0, n_qubits - 1, 2):
+                circ.add(gates.SWAP(i, i+1))
+
+        # RY single-qubit layer
+        for i in range(n_qubits):
+            circ.add(gates.RY(i, theta=0.0))
+
+    return circ
+
+
+
 if ANSATZ == "STD":
     INITAMPLITUDES = "RAND"
+if ANSATZ == "LUCJ" and INITAMPLITUDES == "MP2":
+    INITAMPLITUDES = "HF"
+
 # --- Unit conversion setup ---
 if UNITS == 0:
     length_unit = "Å";   energy_unit = "Ha"
@@ -290,6 +469,8 @@ def compute_energy(raw_d, init_params=None):
             include_hf=True,
             use_mp2_guess=(INITAMPLITUDES == "MP2")
         )
+    elif ANSATZ == "LUCJ":
+        circ = enhanced_lucj_ansatz(nqubits, n_layers=ANSATZPARAMS, include_hf=False, use_parameter_sharing=True)
     else:
         raise ValueError(f"Unknown ansatz: {ANSATZ}")
 
@@ -406,8 +587,6 @@ def main():
     distances = np.concatenate(segments)
     NPTS = distances.size
 
-    logging.info(f"#  distance({length_unit})    scf_energy({energy_unit})    vqe_energy({energy_unit})    fci_energy({energy_unit})")
-
     TotalNPTS = sum(NPTS_LIST)
     progress = 0
     print(f"\n ^^^^^^^^ PROGRESS: {progress}/{TotalNPTS} ^^^^^^^^\n")
@@ -432,7 +611,7 @@ def main():
             ccsd_t_energies.append(ccsd_t_e)
             progress += 1
             print(f"\n ^^^^^^^^PROGRESS: {progress}/{TotalNPTS}\n ")
-            logging.info(f"{d:8.4f}    {scf_e:12.8f}    {vqe_e:12.8f}    {fci_e:12.8f}")
+            logging.info(f"#  distance({d:8.4f})    scf_energy({scf_e:12.8f})    vqe_energy({vqe_e:12.8f})    fci_energy({fci_e:12.8f})")
         results = list(zip(scf_energies, vqe_energies, fci_energies, ccsd_t_energies))
     else:
         # Parallel runs: no warm-start dependence

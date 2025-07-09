@@ -1,2 +1,5 @@
 # Ignore all folders
 */
+
+# Ignore the following files
+IBM_apikey.json
