@@ -2,8 +2,9 @@
 """
 qcqc_mit.py
 
-Quantum Chemistry + VQE dissociation curve driver
-for H₂ (and similar) benchmarking via PySCF, Qibochemical, Qibo & SciPy.
+driver for Quantum Chemistry via VQE
+for dissociation curves of H₂ (and dimers in general)
+benchmarking via Qiskit, Qibo, PySCF, & SciPy.
 
 Author: Martin-Isbjörn Trappe
 Email: martin.trappe@quantumlah.org
@@ -11,15 +12,6 @@ Date: 2025-07-04
 
 Usage:
     bash run_qcqc_mit.sh
-
-Dependencies:
-    - qibochem
-    - qibo
-    - pyscf
-    - scipy
-    - numpy
-    - matplotlib
-    - pandas
 
 See the “BEGIN USER INPUT” / “END USER INPUT” section below to configure:
     • PROJECT name, units, geometry grid, ansatz, optimizer settings, etc.
@@ -31,31 +23,35 @@ See the “BEGIN USER INPUT” / “END USER INPUT” section below to configure
 # ===== BEGIN USER INPUT =====
 # ============================
 PROJECT = "H2_dissociation" # Project name
+MIDDLEWARE = 'qiskit' # 'qiskit' or 'qibo'
+USE_RUNTIME = False  # keep False for local EstimatorV2 runs
 USE_QIBOJIT = False  # default: True; set to False for numpy backend
 DEBUG = True # False -- True
-MINIMAL_EXAMPLE = True # Minimal example for gauing computing time
+MINIMAL_EXAMPLE = True # Minimal example for gauging computing time
 THREADS = 1 # os.cpu_count()  # Parallel processes
 # Units and geometry sampling
 UNITS = 2        # 0: {Ha, Å} -- 1: {eV, Bohr} -- 2: {Ha, Bohr} -- 3: {eV, Å}
-xStart = 0.5     # Starting H–H distance (in chosen length units)
-xEnd   = 8     # Ending   H–H distance
-# breakpoints must start with xStart and end with xEnd:
+xStart = 0.5     # Starting dimer distance (in chosen length units)
+xEnd   = 8     # Ending dimer distance
+# BBB breakpoints must start with xStart and end with xEnd:
 xPoints = [xStart, 0.8, 1.3, 1.39, 1.41, 1.5, 2.0, 2.75, 4.0, 6.0, xEnd]
-# number of distances in each interval [xPoints[i], xPoints[i+1]] (summming to total number NPTS of bond-length points):
+#xPoints = [xStart,xEnd]
+# number of distances in each of the BBB-1 intervals [xPoints[i], xPoints[i+1]] (summming to total number NPTS of bond-length points):
 #NPTS_LIST = [10,10,10,10,10,10,10,10,10,10]
 NPTS_LIST = [1,1,1,1,1,1,1,1,1,1]
+#NPTS_LIST = [3]
 # Quantum chemistry and quantum circuit parameters
 BASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g {0.03sec/iter} -- 6-31g(d,p) {>3000sec/iter} -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
 FCIBASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
 CCSDTBASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
-ANSATZ = "STD"  # "STD": (layered) hardware-efficient ansatz -- "UCCSD": chemically motivated unitary CC -- "LUCJ": Local Unitary Cluster Jastrow --
+ANSATZ = "UCCSD"  # "STD": (layered) hardware-efficient ansatz -- "UCCSD": chemically motivated unitary CC -- "LUCJ": Local Unitary Cluster Jastrow --
 ANSATZPARAMS = 1 # For STD: number of layers -- For UCCSD: Number of Trotter steps in operator splitting --
 INITAMPLITUDES = "HF"  # Initial guess: "RAND", "HF", or "MP2" (if UCCSD)
 # Classical optimization parameters
-OPTIMIZER = "BFGS"   # Classical scipy optimizer: CG -- COBYLA -- BFGS -- Nelder-Mead -- Powell --
-TOLERANCE = 1e-2 # energy change convergence tolerance for classical optimizer
+OPTIMIZER = "BFGS"   # Classical (scipy) optimizer: CG -- COBYLA -- BFGS -- Nelder-Mead -- Powell -- etc
+TOLERANCE = 1e-6 # energy change convergence tolerance for classical optimizer
 MAXITER = 1000 # maximum number of iterations for classical optimizer
-REPEAT = 10 # select the best result from REPEAT classical optimizer runs
+REPEAT = 20 # select the best result from REPEAT classical optimizer runs
 # ==========================
 # ===== END USER INPUT =====
 # ==========================
@@ -76,57 +72,79 @@ import logging
 import matplotlib.pyplot as plt
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from functools import partial
 import multiprocessing as mp
 
 import numpy as np
 from scipy.optimize import minimize
-from pyscf import lib, gto, scf, fci ,cc
-from qibochem.driver import Molecule  # Quantum chemistry driver: builds molecule & integrals via PySCF
-from qibo import set_backend, get_backend, gates, Circuit # Qibo: quantum computing framework
-from qibo.models import VQE # Variational Quantum Eigensolver model
-from qibochem.ansatz.ucc import ucc_ansatz, hf_circuit, ucc_circuit  # Unitary Coupled Cluster ansatz builder, etc.
-from qibochem.measurement.result import expectation
-from qibo.ui import plot_circuit
+from pyscf import gto, scf, fci ,cc, ao2mo
 
+
+from pyscf import ao2mo
+
+from qiskit.circuit import QuantumCircuit
+from qiskit.circuit.library import PauliEvolutionGate
+from qiskit.quantum_info import SparsePauliOp, Statevector
+
+from openfermion.circuits import uccsd_singlet_paramsize, uccsd_singlet_generator
+from openfermion.chem.molecular_data import spinorb_from_spatial
+from openfermion.transforms import jordan_wigner, get_fermion_operator
+from openfermion.ops import InteractionOperator
+
+
+
+
+USE_QIBOJIT = False
 
 import qiskit
 
 print("\nQiskit version:", qiskit.__version__, "\n")
-
-# 1) Import the Runtime client
-from qiskit_ibm_runtime import QiskitRuntimeService
-
-# 2) Load your IBM creds from the JSON next to this script
-cfg_path = os.path.join(os.path.dirname(__file__), "IBM_apikey.json")
-with open(cfg_path, "r") as f:
-    cfg = json.load(f)
-
-# 3) Save (once) so that QiskitRuntimeService() can auto-discover them
-home_cfg = os.path.expanduser("~/.qiskit/qiskit-ibm.json")
-if not os.path.exists(home_cfg):
-    QiskitRuntimeService.save_account(
-        channel="ibm_quantum_platform",
-        token=cfg["apikey"],
-        instance=cfg["crn"],
-        overwrite=False
-    )
-
-# 4) Instantiate the service (reads from ~/.qiskit/qiskit-ibm.json)
-service = QiskitRuntimeService()
-
-# 5) Simple check: list available backends
-all_backends = service.backends()
-hardware = [b.name for b in all_backends if not b.configuration().simulator]
-simulators = [b.name for b in all_backends if b.configuration().simulator]
-
-print("Operational hardware backends:", hardware)
-print("Available simulators:", simulators,"\n")
-
-print("Local qiskit simulator:")
-
-from qiskit import QuantumCircuit, transpile
+from qiskit import transpile
+from qiskit.circuit import QuantumCircuit, Parameter, ParameterVector
+from qiskit.quantum_info import SparsePauliOp
 from qiskit_aer import AerSimulator
+from qiskit.circuit.library import EfficientSU2, PauliEvolutionGate
+
+# --- OpenFermion ---
+from openfermion.ops import InteractionOperator
+from openfermion.circuits import uccsd_singlet_generator, uccsd_singlet_paramsize
+from openfermion.transforms import jordan_wigner, get_fermion_operator
+from openfermion.chem.molecular_data import spinorb_from_spatial  # spatial→spin-orb integrals
+
+# Prefer Aer EstimatorV2 if present, else SDK's reference EstimatorV2 (ADD)
+try:
+    from qiskit_aer.primitives import EstimatorV2 as LocalEstimator
+except Exception:
+    from qiskit.primitives import EstimatorV2 as LocalEstimator  # same V2 interface
+
+if USE_RUNTIME:
+    # 1) Import the Runtime client
+    from qiskit_ibm_runtime import QiskitRuntimeService
+
+    # 2) Load your IBM creds from the JSON next to this script
+    cfg_path = os.path.join(os.path.dirname(__file__), "IBM_apikey.json")
+    with open(cfg_path, "r") as f:
+        cfg = json.load(f)
+
+    # 3) Save (once) so that QiskitRuntimeService() can auto-discover them
+    home_cfg = os.path.expanduser("~/.qiskit/qiskit-ibm.json")
+    if not os.path.exists(home_cfg):
+        QiskitRuntimeService.save_account(
+            channel="ibm_quantum_platform",
+            token=cfg["apikey"],
+            instance=cfg["crn"],
+            overwrite=False
+        )
+
+    # 4) Instantiate the service (reads from ~/.qiskit/qiskit-ibm.json)
+    service = QiskitRuntimeService()
+
+    # 5) Simple check: list available backends
+    all_backends = service.backends()
+    hardware = [b.name for b in all_backends if not b.configuration().simulator]
+    simulators = [b.name for b in all_backends if b.configuration().simulator]
+
+    print("Operational hardware backends:", hardware)
+    print("Available simulators:", simulators,"\n")
 
 # 1) Build your circuit (e.g. Bell)
 qc = QuantumCircuit(2)
@@ -143,22 +161,25 @@ sim = AerSimulator()
 qc2 = transpile(qc, sim)
 
 # 5) Run and fetch results
-job    = sim.run(qc2, shots=1024)
+job = sim.run(qc2, shots=1024)
 result = job.result()
 print("Counts:", result.get_counts())
+print("Local qiskit simulator works\n")
 
 
-
+from qibochem.driver import Molecule  # Quantum chemistry driver: builds molecule & integrals via PySCF
+from qibo import set_backend, get_backend, gates, Circuit # Qibo: quantum computing framework
+from qibo.models import VQE # Variational Quantum Eigensolver model
+from qibochem.ansatz.ucc import ucc_ansatz, hf_circuit, ucc_circuit  # Unitary Coupled Cluster ansatz builder, etc.
+from qibochem.measurement.result import expectation
 
 if USE_QIBOJIT:
     set_backend("qibojit") # for CPU
     #set_backend("qibojit", platform="gpu")  # if using CuPy/CUDA
 else:
     set_backend("numpy")
-from qibo import get_backend
 backend = get_backend()
 print(f"\n → Qibo backend = {backend.name}, platform = {backend.platform}\n")
-import logging
 logging.getLogger("qibo").setLevel(logging.DEBUG)
 
 
@@ -193,179 +214,21 @@ timestamp = os.environ["QUANTCHEM_TS"]
 script_dir = os.path.dirname(os.path.realpath(__file__))
 data_dir   = os.path.join(script_dir, "data")
 os.makedirs(data_dir, exist_ok=True)
+out_dir = os.path.join(data_dir, f"qcqc_mit_{timestamp}")
+os.makedirs(out_dir, exist_ok=True)
 
 
 # ——— universal Tee (for parent + all children) ———
-log_path = os.path.join(data_dir, f"qcqc_{PROJECT}_{timestamp}.log")
+log_path = os.path.join(out_dir, f"qcqc_{PROJECT}_{timestamp}.log")
 # append so that multiple processes write to the same file
 log_file = open(log_path, "a")
 sys.stdout = Tee(sys.__stdout__, log_file)
 sys.stderr = sys.stdout
 
+
+# -------------------------------
 # --- Post-Process user input ---
-
-if MINIMAL_EXAMPLE:
-    print("start MINIMAL EXAMPLE for gauging computing time")
-
-    # --- Molecule setup: H₂ with accurate basis, e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
-    DISTANCE = 0.7
-    h2 = Molecule([('H', (0.0, 0.0, 0.0)), ('H', (0.0, 0.0, DISTANCE))], basis=BASIS)
-    h2.run_pyscf()
-    hamiltonian = h2.hamiltonian()
-
-    # --- UCC ansatz: HF reference + full excitations
-    print(f"→ Spin orbitals: {h2.nso}, electrons: {h2.nelec}")
-    circuit = hf_circuit(h2.nso, h2.nelec)
-    circuit += ucc_circuit(h2.nso, list(range(h2.nso)))
-
-    # --- VQE setup
-    vqe = VQE(circuit, hamiltonian)
-    nparams = len(circuit.get_parameters())
-    initial_parameters = np.random.uniform(0.0, 2*np.pi, nparams)
-
-    print(f"→ Circuit has {nparams} parameters")
-
-    # --- Callback for live progress updates
-    def callback(xk):
-        t0 = time.perf_counter()
-        circuit.set_parameters(xk)
-        result = circuit()
-        state = result.state()  # ← Extract raw statevector
-        energy = hamiltonian.expectation(state)
-        t1 = time.perf_counter()
-        print(f"→ Iter energy = {energy:.8f} Ha, time = {t1 - t0:.3f}s")
-        sys.stdout.flush()
-
-    # --- Minimize
-    print("→ Starting VQE optimization…")
-    t0 = time.perf_counter()
-    energy, params, extra = vqe.minimize(
-        initial_parameters,
-        method="BFGS",
-        options={"maxiter": 1000, "disp": True},
-        callback=callback
-    )
-    t1 = time.perf_counter()
-
-    # --- Results
-    print(f"\n✅ VQE ground state energy at DISTANCE={DISTANCE} in {BASIS} basis: {energy:.10f} Ha")
-    print(f"✅ Optimization time: {t1 - t0:.2f} seconds")
-
-    print(" end MINIMAL EXAMPLE for gauging computing time\n")
-
-
-
-# def lucj_ansatz(n_qubits, n_layers=1):
-#     """
-#     Local Unitary Cluster Jastrow (LUCJ) ansatz:
-#     Alternating layers of parameterized RZZ entanglers and RY rotations.
-#     """
-#     from qibo import gates, Circuit
-#     circ = Circuit(n_qubits)
-#
-#     for l in range(n_layers):
-#         # --- Jastrow-like ZZ entanglers ---
-#         for i in range(n_qubits - 1):
-#             theta = 0.0
-#             circ.add(gates.RZZ(i, i + 1, theta=theta))
-#
-#         # --- Local RY rotations ---
-#         for i in range(n_qubits):
-#             theta = 0.0
-#             circ.add(gates.RY(i, theta=theta))
-#
-#     return circ
-
-# def lucj_ansatz(n_qubits, n_layers=1):
-#     from qibo import gates, Circuit
-#     from qibochem.ansatz.ucc import hf_circuit
-#
-#     circ = Circuit(n_qubits)
-#
-#     if INITAMPLITUDES == "HF":
-#         circ += hf_circuit(n_qubits, n_electrons=n_qubits // 2)
-#
-#     for l in range(n_layers):
-#         # --- Choose entangler type ---
-#         if l % 3 == 0:
-#             entangler = gates.RZZ
-#             name = "zz"
-#         elif l % 3 == 1:
-#             entangler = gates.RXX
-#             name = "xx"
-#         else:
-#             entangler = gates.RYY
-#             name = "yy"
-#
-#         # All-to-all entanglers
-#         for i in range(n_qubits):
-#             for j in range(i+1, n_qubits):
-#                 circ.add(entangler(i, j, theta=0.0))
-#
-#         # Single-qubit RY rotations
-#         for i in range(n_qubits):
-#             circ.add(gates.RY(i, theta=0.0))
-#
-#     return circ
-from qibo import gates, Circuit
-from qibochem.ansatz.ucc import hf_circuit
-
-def enhanced_lucj_ansatz(n_qubits, n_layers=2, include_hf=False, use_parameter_sharing=False):
-    """
-    Enhanced LUCJ ansatz:
-    - Alternating entanglers (RZZ, RXX, RYY)
-    - All-to-all connectivity per layer
-    - Optional HF reference state
-    - Optional parameter sharing across layers
-    - Placeholder SWAP layers for symmetry (fixed for now)
-
-    Args:
-        n_qubits (int): number of qubits
-        n_layers (int): number of LUCJ layers
-        include_hf (bool): whether to prepend Hartree–Fock reference circuit
-        use_parameter_sharing (bool): whether to share parameters across layers
-
-    Returns:
-        qibo.Circuit: parameterized LUCJ circuit
-    """
-    circ = Circuit(n_qubits)
-
-    if include_hf:
-        circ += hf_circuit(n_qubits, nelectrons=n_qubits // 2)
-
-    # Entangler types alternating
-    entangler_sequence = [gates.RZZ, gates.RXX, gates.RYY]
-
-    # Optional: parameter table for sharing
-    shared_params = {}
-
-    for l in range(n_layers):
-        entangler = entangler_sequence[l % len(entangler_sequence)]
-
-        # All-to-all entanglers
-        for i in range(n_qubits):
-            for j in range(i+1, n_qubits):
-                if use_parameter_sharing:
-                    key = (entangler.__name__, i, j)
-                    if key not in shared_params:
-                        shared_params[key] = 0.0
-                    theta = shared_params[key]
-                else:
-                    theta = 0.0
-                circ.add(entangler(i, j, theta=theta))
-
-        # Optional symmetry-preserving SWAPs (placeholder, unparameterized)
-        if n_qubits >= 4:
-            for i in range(0, n_qubits - 1, 2):
-                circ.add(gates.SWAP(i, i+1))
-
-        # RY single-qubit layer
-        for i in range(n_qubits):
-            circ.add(gates.RY(i, theta=0.0))
-
-    return circ
-
-
+# -------------------------------
 
 if ANSATZ == "STD":
     INITAMPLITUDES = "RAND"
@@ -390,7 +253,285 @@ elif UNITS == 3:
     convert_distance = 1                 # keep Å
     convert_energy = 27.2114079527       # Ha → eV
 
+
 CircuitSavedQ = False
+
+
+# ===== Backend-agnostic helpers =====
+
+def _hf_occupied_qubits(n_spin_orb, n_elec):
+    occ = []
+    for p in range(n_elec // 2):
+        occ.extend([2 * p, 2 * p + 1])
+    return occ
+
+
+def _map_of_to_qiskit(i, n):
+    # OpenFermion left-to-right → Qiskit right-to-left
+    return n - 1 - i
+
+
+def _qop_to_sparse_pauli_op(qop, n_qubits, reverse_qubit_order=True):
+    paulis = []
+    coeffs = []
+    for term, coeff in qop.terms.items():
+        if not term:
+            label = "I" * n_qubits
+        else:
+            chars = ["I"] * n_qubits
+            for q, op in term:
+                chars[q] = op.upper()
+            label = "".join(reversed(chars)) if reverse_qubit_order else "".join(chars)
+        paulis.append(label)
+        coeffs.append(complex(coeff))
+    return SparsePauliOp.from_list(list(zip(paulis, coeffs)))
+
+
+def _build_sparse_h_from_h2(h2):
+    """
+    Reuse the PySCF mol/mf that h2.run_pyscf() already produced.
+    Returns (Hsparse, n_spin_orb, n_elec).
+    """
+    mol = None
+    mf = None
+    for name in dir(h2):
+        try:
+            obj = getattr(h2, name)
+        except Exception:
+            continue
+        if mol is None and callable(getattr(obj, "intor", None)) and hasattr(obj, "nelectron"):
+            mol = obj
+        if mf is None and hasattr(obj, "mo_coeff") and callable(getattr(obj, "get_hcore", None)):
+            mf = obj
+        if mol is not None and mf is not None:
+            break
+    if mol is None or mf is None:
+        raise RuntimeError("Could not locate PySCF `mol`/`mf` inside h2; please expose them as attributes.")
+
+    C = mf.mo_coeff
+    h1_ao = mf.get_hcore()
+    eri_ao = mol.intor("int2e")
+
+    h1_mo = C.T @ h1_ao @ C
+    eri_mo = ao2mo.full(mol, C, aosym="s1")
+    eri_mo = ao2mo.restore(1, eri_mo, C.shape[1])
+
+    h1_so, h2_so = spinorb_from_spatial(h1_mo, eri_mo)
+
+    n_spin_orb = h1_so.shape[0]
+    n_elec = mol.nelectron
+    const_e = mol.energy_nuc()
+
+    H_int = InteractionOperator(constant=const_e, one_body_tensor=h1_so, two_body_tensor=h2_so)
+    ferm = get_fermion_operator(H_int)
+    qubit = jordan_wigner(ferm)
+
+    Hsparse = _qop_to_sparse_pauli_op(qubit, n_spin_orb, reverse_qubit_order=True)
+    return Hsparse, n_spin_orb, n_elec
+
+
+def _uccsd_singlet_generator_safe(theta_vec, n_so, n_elec):
+    """
+    OpenFermion changed arg order across versions; try both.
+    Returns a FermionOperator representing (T - T†) (anti-Hermitian up to factor i).
+    """
+    try:
+        # common signature
+        return uccsd_singlet_generator(n_so, n_elec, theta_vec, anti_hermitian=True)
+    except TypeError:
+        # older/newer alt signature
+        return uccsd_singlet_generator(theta_vec, n_so, n_elec, anti_hermitian=True)
+
+
+# ===== Evaluator interface =====
+
+class _BaseEvaluator:
+    def __init__(self):
+        self.nparams = 0
+
+    def objective(self, theta):
+        raise NotImplementedError
+
+
+class QiboEvaluator(_BaseEvaluator):
+    def __init__(self, h2):
+        super().__init__()
+        self.hamiltonian = h2.hamiltonian()
+        self.circuit = hf_circuit(h2.nso, h2.nelec)
+        self.circuit += ucc_circuit(h2.nso, list(range(h2.nso)))
+        self.nparams = len(self.circuit.get_parameters())
+
+    def objective(self, theta):
+        self.circuit.set_parameters(theta)
+        return float(expectation(self.circuit, self.hamiltonian))
+
+
+class QiskitEvaluator(_BaseEvaluator):
+    def __init__(self, h2):
+        super().__init__()
+        self.Hsparse, self.n_so, self.n_elec = _build_sparse_h_from_h2(h2)
+        # H2/STO-3G → 1 parameter; keep generic
+        self.nparams = uccsd_singlet_paramsize(self.n_so, self.n_elec, anti_hermitian=True)
+
+    def _build_circuit(self, theta_vec):
+        gen_ferm = _uccsd_singlet_generator_safe(theta_vec, self.n_so, self.n_elec)  # anti-Hermitian
+        gen_ferm = 1j * gen_ferm  # make Hermitian for time-evolution
+        gen_qubit = jordan_wigner(gen_ferm)
+        H_theta = _qop_to_sparse_pauli_op(gen_qubit, self.n_so, reverse_qubit_order=True)
+
+        qc = QuantumCircuit(self.n_so)
+        for i_of in _hf_occupied_qubits(self.n_so, self.n_elec):
+            qc.x(_map_of_to_qiskit(i_of, self.n_so))
+        qc.append(PauliEvolutionGate(H_theta, time=1.0), qc.qubits)
+        return qc
+
+    def objective(self, theta_vec):
+        qc = self._build_circuit(theta_vec)
+        sv = Statevector.from_instruction(qc)
+        e = sv.expectation_value(self.Hsparse)
+        return float(np.real(e))
+
+
+
+
+# -----------------------------
+# --- BEGIN MINIMAL EXAMPLE ---
+# -----------------------------
+
+if MINIMAL_EXAMPLE:
+    print("start MINIMAL EXAMPLE for gauging computing time")
+
+    DISTANCE = xStart / convert_distance
+
+    if MIDDLEWARE == 'qibo':
+
+        h2 = Molecule([('H', (0.0, 0.0, 0.0)), ('H', (0.0, 0.0, DISTANCE))], basis=BASIS)
+        h2.run_pyscf()
+        scf_energy = h2.e_hf
+        print(f"→ Classical RHF total energy from PySCF (includes E_nuc): {scf_energy:.8f} Ha")
+        print(f"→ Spin orbitals: {h2.nso}, electrons: {h2.nelec}")
+
+        if MIDDLEWARE == 'qiskit':
+            evaluator = QiskitEvaluator(h2)
+        else:
+            evaluator = QiboEvaluator(h2)
+
+        print(f"→ Circuit has {evaluator.nparams} parameter(s)")
+        print("→ Starting VQE optimization…")
+
+        init_mode = globals().get('INITAMPLITUDES', 'RANDOM')
+        if isinstance(init_mode, str) and init_mode.upper() == 'HF':
+            x0 = np.zeros(evaluator.nparams)
+        else:
+            x0 = np.random.uniform(0.0, 2 * np.pi, evaluator.nparams)
+
+        opt_method = globals().get('OPTIMIZER', 'BFGS')
+        maxiter = int(globals().get('MAXITER', 100))
+
+        t_last = [time.time()]
+        def _cb(xk):
+            now = time.time()
+            dt = now - t_last[0]
+            t_last[0] = now
+            e = evaluator.objective(xk)
+            print(f"→ Iter energy = {e: .8f} Ha, time = {dt:.3f}s")
+
+        t0 = time.time()
+        res = minimize(
+            evaluator.objective,
+            x0,
+            method=opt_method,
+            options={'maxiter': maxiter, 'disp': True},
+            callback=_cb
+        )
+
+        print()
+        print(f"✅ VQE ground state energy at DISTANCE={DISTANCE} in {BASIS} basis: {res.fun:.10f} Ha")
+        print(f"✅ Optimization time: {time.time() - t0:.2f} seconds")
+        print(" end MINIMAL EXAMPLE for gauging computing time")
+
+    elif MIDDLEWARE == 'qiskit':
+        print("→ Running MINIMAL EXAMPLE with Qiskit backend")
+
+        # 1. Build molecule and run RHF with PySCF (via qibochem)
+        h2 = Molecule([('H', (0.0, 0.0, 0.0)), ('H', (0.0, 0.0, DISTANCE))], basis=BASIS)
+        h2.run_pyscf()
+        scf_energy = h2.e_hf
+        print(f"→ Classical RHF total energy from PySCF (includes E_nuc): {scf_energy:.8f} Ha")
+        n_qubits = h2.nso
+        n_electrons = h2.nelec
+        print(f"→ Spin orbitals: {n_qubits}, electrons: {n_electrons}")
+
+        # 2. Construct the Qiskit qubit Hamiltonian from molecular integrals
+        one_body_integrals = h2.oei
+        two_body_integrals = h2.tei
+        one_body_spin_ints, two_body_spin_ints = spinorb_from_spatial(one_body_integrals, two_body_integrals)
+
+        # Create Fermionic operator (nuclear repulsion handled separately)
+        hamiltonian_op = InteractionOperator(0, one_body_spin_ints, 0.5 * two_body_spin_ints)
+        fermion_hamiltonian = get_fermion_operator(hamiltonian_op)
+
+        # Map to qubit operator (Jordan-Wigner) and convert to Qiskit's SparsePauliOp
+        qubit_hamiltonian_of = jordan_wigner(fermion_hamiltonian)
+        pauli_list = []
+        for op, coeff in qubit_hamiltonian_of.terms.items():
+            if abs(coeff.imag) > 1e-9: continue
+            pauli_str = ['I'] * n_qubits
+            for qubit_idx, pauli_op in op:
+                pauli_str[qubit_idx] = pauli_op
+            pauli_list.append(("".join(reversed(pauli_str)), coeff.real))
+        qubit_hamiltonian_qiskit = SparsePauliOp.from_list(pauli_list)
+        nuclear_repulsion_energy = h2.e_nuc
+
+        # 3. Build variational ansatz (Hartree-Fock state + EfficientSU2)
+        ansatz = EfficientSU2(n_qubits, reps=1, entanglement='linear')
+        n_params = len(ansatz.parameters)
+        hf_state = QuantumCircuit(n_qubits)
+        for i in range(n_electrons):
+            hf_state.x(i)
+        full_ansatz = hf_state.compose(ansatz)
+        # Transpile the circuit for the Aer simulator
+        transpiled_ansatz = transpile(full_ansatz, backend=sim)
+
+        print(f"→ Circuit has {n_params} parameters")
+        print("→ Starting VQE optimization…")
+
+        # 4. Define VQE objective function using Qiskit EstimatorV2
+        estimator = LocalEstimator()
+        def vqe_objective_qiskit(theta):
+            pub = (transpiled_ansatz, qubit_hamiltonian_qiskit, theta)
+            result = estimator.run([pub]).result()
+            est_val = result[0].data.evs
+            return est_val + nuclear_repulsion_energy
+
+        # 5. Run classical optimization
+        x0 = np.random.uniform(0.0, 2 * np.pi, n_params)
+        opt_method = globals().get('OPTIMIZER', 'BFGS')
+        maxiter = int(globals().get('MAXITER', 100))
+
+        t_last = [time.time()]
+        def _cb_qiskit(xk):
+            now = time.time()
+            dt = now - t_last[0]
+            t_last[0] = now
+            e = vqe_objective_qiskit(xk)
+            print(f"→ Iter energy = {e: .8f} Ha, time = {dt:.3f}s")
+
+        t0 = time.time()
+        res = minimize(
+            vqe_objective_qiskit, x0, method=opt_method,
+            options={'maxiter': maxiter, 'disp': True},
+            callback=_cb_qiskit
+        )
+
+        print()
+        print(f"✅ VQE ground state energy at DISTANCE={DISTANCE} in {BASIS} basis: {res.fun:.10f} Ha")
+        print(f"✅ Optimization time: {time.time() - t0:.2f} seconds")
+
+# ---------------------------
+# --- END MINIMAL EXAMPLE ---
+# ---------------------------
+
 
 def compute_energy(raw_d, init_params=None):
     """
@@ -406,6 +547,7 @@ def compute_energy(raw_d, init_params=None):
       5) Run VQE: classical outer loop optimizing parameters to minimize expectation value.
     """
 
+
     global CircuitSavedQ
 
     distance = raw_d/convert_distance
@@ -420,7 +562,7 @@ def compute_energy(raw_d, init_params=None):
     sys.stdout.flush()
 
     if DEBUG:
-        print(" --- 1b) Build the same molecule in FCI for quasi-exact benchmark (of the chosen FCI basis set) ---")
+        print(" --- 1b) Build the same molecule in FCI for quasi-exact benchmark (within the chosen FCI basis set) ---")
         sys.stdout.flush()
     ps_mol = gto.M(atom=[('H',(0,0,0)), ('H',(0,0,distance))], basis=FCIBASIS, verbose=0, output=None)
     ps_mf = scf.RHF(ps_mol).run()
@@ -442,126 +584,218 @@ def compute_energy(raw_d, init_params=None):
         print("CCSD(T) done.")
         sys.stdout.flush()
 
-    if DEBUG:
-        print(" --- 2) Construct fermionic Hamiltonian and map to qubits ---")
-        sys.stdout.flush()
-    H = mol.hamiltonian()
-    nqubits = H.nqubits
+    if MIDDLEWARE == 'qibo':
 
-
-    if DEBUG:
-        print(" --- 3) Build variational ansatz circuit ---")
-        sys.stdout.flush()
-    if ANSATZ == "STD":
-        # (Layered) Hardware-efficient ansatz: ANSATZPARAMS layers of single-qubit RY rotations + chain of CNOTs
-        circ = Circuit(nqubits)
-        for _ in range(ANSATZPARAMS):
-            for i in range(nqubits):
-                circ.add(gates.RY(i, theta=0.0))
-            for i in range(nqubits - 1):
-                circ.add(gates.CNOT(i, i+1))
-    elif ANSATZ == "UCCSD":
-        # Chemically motivated UCCSD: singles & doubles excitations, trotterized
-        circ = ucc_ansatz(
-            mol,
-            trotter_steps=ANSATZPARAMS,
-            ferm_qubit_map="jw",
-            include_hf=True,
-            use_mp2_guess=(INITAMPLITUDES == "MP2")
-        )
-    elif ANSATZ == "LUCJ":
-        circ = enhanced_lucj_ansatz(nqubits, n_layers=ANSATZPARAMS, include_hf=False, use_parameter_sharing=True)
-    else:
-        raise ValueError(f"Unknown ansatz: {ANSATZ}")
-
-    if DEBUG:
-        print(" --- 4) Initialize VQE model with Qibo ---")
-        sys.stdout.flush()
-    vqe = VQE(circ, H)
-    # Prepare initial parameter guess
-    nparams = len(circ.get_parameters())
-    if DEBUG and not CircuitSavedQ:
-        CircuitSavedQ = True
-        print(f"DEBUG (compute_energy): Distance={distance:.4f} Bohr, Basis={BASIS}")
-        # ── count basis functions for the QC basis ──
-        qc_mol = gto.M(
-            atom=[('H', (0,0,0)), ('H', (0,0,distance))],
-            basis=BASIS,
-            verbose=0, output=None
-        )
-        n_spatial = qc_mol.nao_nr()               # number of spatial AOs
-        n_so = 2*n_spatial                        # number of spin-orbitals
-        n_atoms = len(qc_mol.atom)                # should be 2 here
-        print(f"                        Basis functions = {n_so//n_atoms} spin-orbitals per atom, {n_so} total")
-        param_gates = {gates.RY, gates.RZ, gates.RX}
-        # ── count single- and two-qubit gates ──
-        ops = circ.queue      # the list of Gate objects in your circuit
-        param_indices = [i for i, op in enumerate(ops) if type(op) in param_gates]
-        n_single = sum(1 for gate in ops if len(gate.qubits) == 1)
-        n_two    = sum(1 for gate in ops if len(gate.qubits) == 2)
-        print(f"                        Number of qubits = {nqubits}")
-        print(f"                        Number of circuit gates = "
-              f"{n_single} single-qubit, {n_two} two-qubit")
-        print(f"                        Number of circuit parameters         = {nparams}")
-        print(circ.summary())
-        sys.stdout.flush()
-        #SleepForever()
-
-    # Define initial amplitudes
-    if init_params is None:
-        # Cold start: choose HF (zero), MP2 (from ansatz), or random angles
-        if INITAMPLITUDES == "HF":
-            init_params = np.zeros(nparams)
-        elif INITAMPLITUDES == "MP2" and ANSATZ == "UCCSD":
-            init_params = np.asarray(circ.get_parameters()).flatten()
-        else:
-            init_params = np.random.uniform(0, 2 * np.pi, nparams)
-    # Define the objective: expectation value of H at params
-    def vqe_objective(params):
-        # returns a Python float; backend uses state vectors (since no density matrix is explicitly passed and no noise is simulated)
-        circ.set_parameters(params)
-        return expectation(circ, H)
-
-
-
-
-    if DEBUG:
-        print(" --- 5) Classical optimization loop")
-        sys.stdout.flush()
-    if DEBUG and abs(raw_d - xStart)<1e-6:
-        # Iteration counter for the callback
-        iter_count = {'n': 0}
-        def scipy_cb(xk):
-            iter_count['n'] += 1
-            # time one evaluation of the objective
-            t0 = time.perf_counter()
-            ek = vqe_objective(xk)
-            t1 = time.perf_counter()
-            dt = t1 - t0
-            print(f"Iter {iter_count['n']:2d}: energy = {ek:.8f} Ha, params[:3] = {xk[:3]}..., eval_time(obj_func) = {dt:.3f} s")
+        if DEBUG:
+            print(" --- 2) Construct fermionic Hamiltonian and map to qubits ---")
             sys.stdout.flush()
-        callback = scipy_cb
-    else:
+        H = mol.hamiltonian()
+        nqubits = H.nqubits
+
+
+        if DEBUG:
+            print(" --- 3) Build variational ansatz circuit ---")
+            sys.stdout.flush()
+        if ANSATZ == "STD":
+            # (Layered) Hardware-efficient ansatz: ANSATZPARAMS layers of single-qubit RY rotations + chain of CNOTs
+            circ = Circuit(nqubits)
+            for _ in range(ANSATZPARAMS):
+                for i in range(nqubits):
+                    circ.add(gates.RY(i, theta=0.0))
+                for i in range(nqubits - 1):
+                    circ.add(gates.CNOT(i, i+1))
+        elif ANSATZ == "UCCSD":
+            # Chemically motivated UCCSD: singles & doubles excitations, trotterized
+            circ = ucc_ansatz(
+                mol,
+                trotter_steps=ANSATZPARAMS,
+                ferm_qubit_map="jw",
+                include_hf=True,
+                use_mp2_guess=(INITAMPLITUDES == "MP2")
+            )
+        elif ANSATZ == "LUCJ":
+            circ = enhanced_lucj_ansatz(nqubits, n_layers=ANSATZPARAMS, include_hf=False, use_parameter_sharing=True)
+        else:
+            raise ValueError(f"Unknown ansatz: {ANSATZ}")
+
+        if DEBUG:
+            print(" --- 4) Initialize VQE model with Qibo ---")
+            sys.stdout.flush()
+        vqe = VQE(circ, H)
+        # Prepare initial parameter guess
+        nparams = len(circ.get_parameters())
+        if DEBUG and not CircuitSavedQ:
+            CircuitSavedQ = True
+            print(f"DEBUG (compute_energy): Distance={distance:.4f} Bohr, Basis={BASIS}")
+            # ── count basis functions for the QC basis ──
+            qc_mol = gto.M(
+                atom=[('H', (0,0,0)), ('H', (0,0,distance))],
+                basis=BASIS,
+                verbose=0, output=None
+            )
+            n_spatial = qc_mol.nao_nr()               # number of spatial AOs
+            n_so = 2*n_spatial                        # number of spin-orbitals
+            n_atoms = len(qc_mol.atom)                # should be 2 here
+            print(f"                        Basis functions = {n_so//n_atoms} spin-orbitals per atom, {n_so} total")
+            param_gates = {gates.RY, gates.RZ, gates.RX}
+            # ── count single- and two-qubit gates ──
+            ops = circ.queue      # the list of Gate objects in your circuit
+            param_indices = [i for i, op in enumerate(ops) if type(op) in param_gates]
+            n_single = sum(1 for gate in ops if len(gate.qubits) == 1)
+            n_two    = sum(1 for gate in ops if len(gate.qubits) == 2)
+            print(f"                        Number of qubits = {nqubits}")
+            print(f"                        Number of circuit gates = "
+                  f"{n_single} single-qubit, {n_two} two-qubit")
+            print(f"                        Number of circuit parameters         = {nparams}")
+            print(circ.summary())
+            sys.stdout.flush()
+            #SleepForever()
+
+        # Define initial amplitudes
+        if init_params is None:
+            # Cold start: choose HF (zero), MP2 (from ansatz), or random angles
+            if INITAMPLITUDES == "HF":
+                init_params = np.zeros(nparams)
+            elif INITAMPLITUDES == "MP2" and ANSATZ == "UCCSD":
+                init_params = np.asarray(circ.get_parameters()).flatten()
+            else:
+                init_params = np.random.uniform(0, 2 * np.pi, nparams)
+        # Define the objective: expectation value of H at params
+        def vqe_objective(params):
+            # returns a Python float; backend uses state vectors (since no density matrix is explicitly passed and no noise is simulated)
+            circ.set_parameters(params)
+            return expectation(circ, H)
+
+        if DEBUG:
+            print(" --- 5) Classical optimization loop")
+            sys.stdout.flush()
+        if DEBUG and abs(raw_d - xStart)<1e-6:
+            # Iteration counter for the callback
+            iter_count = {'n': 0}
+            def scipy_cb(xk):
+                iter_count['n'] += 1
+                # time one evaluation of the objective
+                t0 = time.perf_counter()
+                ek = vqe_objective(xk)
+                t1 = time.perf_counter()
+                dt = t1 - t0
+                print(f"Iter {iter_count['n']:2d}: energy = {ek:.8f} Ha, params[:3] = {xk[:3]}..., eval_time(obj_func) = {dt:.3f} s")
+                sys.stdout.flush()
+            callback = scipy_cb
+        else:
+            callback = None
+        # Now call SciPy’s minimize (instead of vqe.minimize):
+        for r in range(REPEAT):
+            if REPEAT>1:
+                init_params = np.random.uniform(0, 2 * np.pi, nparams)
+            test = minimize(
+                vqe_objective,
+                init_params,
+                method=OPTIMIZER,
+                tol=TOLERANCE,
+                options={"maxiter": MAXITER, "disp": True},
+                callback=callback
+            )
+            if r==0:
+                result = test
+            elif test.fun < result.fun:
+                result = test
+        # Extract best energy and parameters
+        best_params = result.x
+        best_energy = result.fun
+
+    elif MIDDLEWARE == 'qiskit':
+        if DEBUG:
+            print(" --- 2) Construct Qiskit Hamiltonian and Ansatz ---")
+            sys.stdout.flush()
+
+        # 2a. Construct the Qiskit qubit Hamiltonian from molecular integrals
+        one_body_integrals = mol.oei
+        two_body_integrals = mol.tei
+        one_body_spin_ints, two_body_spin_ints = spinorb_from_spatial(one_body_integrals, two_body_integrals)
+
+        hamiltonian_op = InteractionOperator(0, one_body_spin_ints, 0.5 * two_body_spin_ints)
+        fermion_hamiltonian = get_fermion_operator(hamiltonian_op)
+        qubit_hamiltonian_of = jordan_wigner(fermion_hamiltonian)
+
+        pauli_list = []
+        for op, coeff in qubit_hamiltonian_of.terms.items():
+            if abs(coeff.imag) > 1e-9: continue
+            pauli_str = ['I'] * mol.nso
+            for qubit_idx, pauli_op in op:
+                pauli_str[qubit_idx] = pauli_op
+            pauli_list.append(("".join(reversed(pauli_str)), coeff.real))
+
+        qubit_hamiltonian_qiskit = SparsePauliOp.from_list(pauli_list)
+        nuclear_repulsion_energy = mol.e_nuc
+
+        # 3a. Build variational ansatz (Using EfficientSU2 for now, as in MINIMAL_EXAMPLE)
+        # Note: This part can be expanded to handle the other ANSATZ types like "UCCSD"
+        ansatz = EfficientSU2(mol.nso, reps=ANSATZPARAMS, entanglement='linear')
+        n_params = len(ansatz.parameters)
+
+        hf_state = QuantumCircuit(mol.nso)
+        for i in range(mol.nelec):
+            hf_state.x(i)
+        full_ansatz = hf_state.compose(ansatz)
+        transpiled_ansatz = transpile(full_ansatz, backend=sim)
+
+        if DEBUG:
+            print(" --- 4) Initialize VQE model with Qiskit ---")
+            sys.stdout.flush()
+
+        # 4a. Define VQE objective function
+        estimator = LocalEstimator()
+        def vqe_objective_qiskit(theta):
+            pub = (transpiled_ansatz, qubit_hamiltonian_qiskit, theta)
+            result = estimator.run([pub]).result()
+            est_val = result[0].data.evs
+            return est_val + nuclear_repulsion_energy
+
+        # Determine initial parameters
+        if init_params is None:
+            if INITAMPLITUDES == "HF":
+                init_params = np.zeros(n_params)
+            else: # "RAND" or others
+                init_params = np.random.uniform(0, 2 * np.pi, n_params)
+
+        if DEBUG:
+            print(" --- 5) Classical optimization loop ---")
+            sys.stdout.flush()
+
+        # Define callback for optimizer
         callback = None
-    # Now call SciPy’s minimize (instead of vqe.minimize):
-    for r in range(REPEAT):
-        if REPEAT>1:
-            init_params = np.random.uniform(0, 2 * np.pi, nparams)
-        test = minimize(
-            vqe_objective,
-            init_params,
-            method=OPTIMIZER,
-            tol=TOLERANCE,
-            options={"maxiter": MAXITER, "disp": True},
-            callback=callback
-        )
-        if r==0:
-            result = test
-        elif test.fun < result.fun:
-            result = test
-    # Extract best energy and parameters
-    best_params = result.x
-    best_energy = result.fun
+        if DEBUG and abs(raw_d - xStart) < 1e-6:
+            iter_count = {'n': 0}
+            def scipy_cb(xk):
+                iter_count['n'] += 1
+                t0 = time.perf_counter()
+                ek = vqe_objective_qiskit(xk)
+                dt = time.perf_counter() - t0
+                print(f"Iter {iter_count['n']:2d}: energy = {ek:.8f} Ha, eval_time = {dt:.3f} s")
+                sys.stdout.flush()
+            callback = scipy_cb
+
+        # 5a. Run classical optimization
+        result = None
+        for r in range(REPEAT):
+            if REPEAT > 1:
+                init_params = np.random.uniform(0, 2 * np.pi, n_params)
+
+            test_res = minimize(
+                vqe_objective_qiskit,
+                init_params,
+                method=OPTIMIZER,
+                tol=TOLERANCE,
+                options={"maxiter": MAXITER, "disp": True},
+                callback=callback
+            )
+            if result is None or test_res.fun < result.fun:
+                result = test_res
+
+        best_params = result.x
+        best_energy = result.fun
+
     if DEBUG:
         print("Energy computed.")
         sys.stdout.flush()
@@ -673,7 +907,7 @@ def main():
     print(f"\nTotal wall-clock time: {elapsed:.2f} seconds")
     # Save figure with timestamp and parameter summary
     ANSATZstring = f"{ANSATZ}({ANSATZPARAMS})"
-    plt.savefig(os.path.join(data_dir, f"qcqc_{PROJECT}_{timestamp}_[{xStart}-{xEnd}]({NPTS})_{ANSATZstring}_{INITAMPLITUDES}_{BASIS}_FCI={FCIBASIS}_CCSDT={CCSDTBASIS}_{OPTIMIZER}_{elapsed:.0f}sec.pdf"))
+    plt.savefig(os.path.join(out_dir, f"qcqc_{PROJECT}_{timestamp}_[{xStart}-{xEnd}]({NPTS})_{ANSATZstring}_{INITAMPLITUDES}_{BASIS}_FCI={FCIBASIS}_CCSDT={CCSDTBASIS}_{OPTIMIZER}_{elapsed:.0f}sec.pdf"))
     plt.show()
 
 
@@ -686,7 +920,7 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(message)s",
         handlers=[
-            logging.FileHandler(os.path.join(data_dir, f"qcqc_{PROJECT}_{timestamp}.dat"), mode="w"),
+            logging.FileHandler(os.path.join(out_dir, f"qcqc_{PROJECT}_{timestamp}.dat"), mode="w"),
             logging.StreamHandler(sys.stdout)
         ]
     )
@@ -694,7 +928,7 @@ if __name__ == "__main__":
     # 3) Self-backup and its print() now goes through the Tee
     if mp.current_process().name == "MainProcess":
         script_path = os.path.realpath(__file__)
-        backup_name = os.path.join(data_dir, f"qcqc_{PROJECT}_{timestamp}.py")
+        backup_name = os.path.join(out_dir, f"qcqc_{PROJECT}_{timestamp}.py")
         shutil.copy(script_path, backup_name)
         print(f"Created backup of script as {backup_name}")
 

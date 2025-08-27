@@ -54,7 +54,7 @@ fi
 
 # These packages will not conflict with system-level packages
 echo "→ Updating required Python packages…"
-pip install --quiet matplotlib qibochem qibojit qiskit_ibm_runtime qiskit-aer qiskit-optimization
+pip install --quiet matplotlib qibochem qibojit qiskit_ibm_runtime qiskit-aer openfermion
 
 # 5) Run the Quantum Chemistry project, e.g. H2_dissociation
 echo "→ Running quantum chemistry simulation: qcqc_mit.py"
