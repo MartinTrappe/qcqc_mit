@@ -44,7 +44,7 @@ Email: martin.trappe@quantumlah.org
 
 - **Python 3.7+**
 - **bash** (for `run_qcqc_mit.sh`)
-- **PySCF**, **numpy**, **matplotlib**, **pandas**, **qiskit**, **qibochem**, **qibo**, **scipy**, and more (will be installed autoamtically if missing)
+- **PySCF**, **numpy**, **matplotlib**, **pandas**, **qiskit**, **qibochem**, **qibo**, **scipy**, and more (will be installed automatically if missing)
 
 ---
 
