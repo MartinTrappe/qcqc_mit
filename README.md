@@ -2,7 +2,7 @@
 
 **Quantum Computing for Quantum Chemistry**
 
-Multi-process driver for Hartree–Fock (HF), VQE, FCI and CCSD(T) dissociation curves using PySCF, Qibo & Qibochem.
+Multi-process driver for Hartree–Fock (HF), VQE, FCI and CCSD(T) dissociation curves using VQE via Qiskit & Qibo.
 
 ---
 
@@ -14,7 +14,7 @@ Multi-process driver for Hartree–Fock (HF), VQE, FCI and CCSD(T) dissociation 
 2. Building FCI benchmark in chosen basis
 3. Optionally CCSD(T) reference
 4. Mapping to qubits & constructing a VQE ansatz (hardware-efficient or UCCSD)
-5. Running VQE via Qibo with SciPy optimizers
+5. Running VQE via Qiskit/Qibo with SciPy optimizers
 6. Collecting, logging and plotting all energies
 
 All output is saved in a timestamped `data/` folder, along with a backup of the script.
@@ -44,7 +44,7 @@ Email: martin.trappe@quantumlah.org
 
 - **Python 3.7+**
 - **bash** (for `run_qcqc_mit.sh`)
-- **PySCF**, **numpy**, **matplotlib**, **pandas**, **qibochem**, **qibo**, **scipy**
+- **PySCF**, **numpy**, **matplotlib**, **pandas**, **qiskit**, **qibochem**, **qibo**, **scipy**, and more (will be installed autoamtically if missing)
 
 ---
 
@@ -73,6 +73,7 @@ cd qcqc_mit
 
 **Edit** the `# === USER INPUT ===` block in `qcqc_mit.py` to set your parameters:
 
+   - Middleware backend (qiskit/qibo)
    - VQE BASIS set
    - FCIBASIS set
    - CCSDTBASIS set
