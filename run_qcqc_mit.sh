@@ -59,11 +59,10 @@ pip install --quiet matplotlib qibochem qibojit qiskit_ibm_runtime qiskit-aer op
 # 5) Run the Quantum Chemistry project, e.g. H2_dissociation
 echo "→ Running quantum chemistry simulation: qcqc_mit.py"
 python qcqc_mit.py
+echo "✅ Simulation complete."
 
 # 6) Deactivate the environment (optional here, but clean practice)
 deactivate
-
-echo "✅ Simulation complete. Environment remains at './$VENV'."
 
 
 #To completely remove the virtual environment:
