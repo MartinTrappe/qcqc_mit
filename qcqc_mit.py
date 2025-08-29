@@ -23,23 +23,24 @@ See the “BEGIN USER INPUT” / “END USER INPUT” section below to configure
 # ===== BEGIN USER INPUT =====
 # ============================
 PROJECT = "H2_dissociation" # Project name
-MIDDLEWARE = 'qibo' # 'qiskit' or 'qibo'
+MIDDLEWARE = 'qiskit' # 'qiskit' or 'qibo'
 USE_RUNTIME = False  # keep False for local EstimatorV2 runs
-USE_QIBOJIT = False  # default: True; set to False for numpy backend
+USE_QIBOJIT = False  # default: False for numpy backend
+USE_GPU = False # default: False for CPU
 PRINTALL = True # False -- True
-MINIMAL_EXAMPLE = True # Minimal example for gauging computing time
+MINIMAL_EXAMPLE = False # Minimal example for gauging computing time
 THREADS = 10 # os.cpu_count()  # Parallel processes
 # Units and geometry sampling
 UNITS = 2        # 0: {Ha, Å} -- 1: {eV, Bohr} -- 2: {Ha, Bohr} -- 3: {eV, Å}
 xStart = 0.5     # Starting dimer distance (in chosen length units)
 xEnd   = 8     # Ending dimer distance
 # BBB breakpoints must start with xStart and end with xEnd:
-xPoints = [xStart, 0.8, 1.3, 1.39, 1.41, 1.5, 2.0, 2.75, 4.0, 6.0, xEnd]
-#xPoints = [xStart,xEnd]
+#xPoints = [xStart, 0.8, 1.3, 1.39, 1.41, 1.5, 2.0, 2.75, 4.0, 6.0, xEnd]
+xPoints = [xStart,xEnd]
 # number of distances in each of the BBB-1 intervals [xPoints[i], xPoints[i+1]] (summming to total number NPTS of bond-length points):
 #NPTS_LIST = [10,10,10,10,10,10,10,10,10,10]
-NPTS_LIST = [1,1,1,1,1,1,1,1,1,1]
-#NPTS_LIST = [3]
+#NPTS_LIST = [1,1,1,1,1,1,1,1,1,1]
+NPTS_LIST = [3]
 # Quantum chemistry and quantum circuit parameters
 BASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g {0.03sec/iter} -- 6-31g(d,p) {>3000sec/iter} -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
 FCIBASIS = "sto-3g"  # Basis set for PySCF: e.g. sto-3g -- 6-31g -- 6-31g(d,p) -- cc-pVDZ -- aug-cc-pVQZ -- aug-cc-pV5Z --
@@ -171,6 +172,12 @@ os.makedirs(out_dir, exist_ok=True)
 class Tee(object):
     def __init__(self, *streams):
         self.streams = streams
+        # FIX: Add the encoding attribute by delegating to the original stdout
+        # This makes the Tee object compatible with libraries like Qiskit's drawer.
+        try:
+            self.encoding = sys.__stdout__.encoding
+        except AttributeError:
+            self.encoding = 'utf-8' # A safe fallback
     def write(self, data):
         for s in self.streams:
             s.write(data)
@@ -219,9 +226,12 @@ if MIDDLEWARE == 'qiskit':
 
 
 if USE_QIBOJIT:
-    set_backend("qibojit") # for CPU
-    #set_backend("qibojit", platform="gpu")  # if using CuPy/CUDA
+    if USE_GPU:
+        set_backend("qibojit", platform="gpu")  # if using CuPy/CUDA
+    else:
+        set_backend("qibojit") # for CPU
 else:
+    USE_GPU = False
     set_backend("numpy")
 backend = get_backend()
 print(f"\n → Qibo backend = {backend.name}, platform = {backend.platform}\n")
@@ -256,7 +266,7 @@ elif UNITS == 3:
 if MINIMAL_EXAMPLE == True:
     THREADS = 1
 
-CircuitSavedQ = False
+CircuitSummaryQ = False
 
 # ==========================================
 # ===== END POST-PROCESSING USER INPUT =====
@@ -322,31 +332,34 @@ def _uccsd_singlet_generator_safe(theta_vec, n_so, n_elec):
 
 
 # ==========================================
-# ===== BEGIN MAIN COMPUATIONAL MODULE =====
+# ===== BEGIN MAIN COMPUTATIONAL MODULE =====
 # ==========================================
 
 def compute_energy(raw_d, init_params=None):
     """
     Compute SCF, VQE, FCI, and CCSD(T) energies for a molecule at a given distance.
     """
-    global CircuitSavedQ
+    global CircuitSummaryQ
 
     distance = raw_d / convert_distance
 
-    # --- 1. Classical Chemistry (Common to both backends) ---
+    # --- 1. Classical Chemistry ---
     if PRINTALL: print(" --- 1a) Build molecule with qibochem and run mean-field RHF ---")
-    mol = Molecule([('H', (0.0, 0.0, 0.0)), ('H', (0.0, 0.0, distance))], basis=BASIS)
+    mol = Molecule([('H', (0.0, 0.0, 0.0)), ('H', (0.0, 0.0, distance))], basis=BASIS) # qibo
     mol.run_pyscf()
     scf_energy = mol.e_hf
     print("HF done.")
 
     if PRINTALL: print(" --- 1b) Run FCI benchmark ---")
-    ps_mol = gto.M(atom=[('H', (0, 0, 0)), ('H', (0, 0, distance))], basis=FCIBASIS, verbose=0, output=None)
+    ps_mol = gto.M(atom=[('H', (0, 0, 0)), ('H', (0, 0, distance))], basis=FCIBASIS, verbose=0, output=None) # pyscf
     ps_mf = scf.RHF(ps_mol).run(verbose=0)
     fci_energy, _ = fci.FCI(ps_mf).kernel()
     if PRINTALL: print("FCI done.")
 
     if PRINTALL: print(" --- 1c) Run CCSD(T) benchmark ---")
+    if CCSDTBASIS != FCIBASIS:
+        ps_mol = gto.M(atom=[('H', (0, 0, 0)), ('H', (0, 0, distance))], basis=CCSDTBASIS, verbose=0, output=None) # pyscf
+        ps_mf = scf.RHF(ps_mol).run(verbose=0)
     mycc = cc.CCSD(ps_mf).run(verbose=0)
     ccsd_t_energy = mycc.e_tot + mycc.ccsd_t()
     if PRINTALL: print("CCSD(T) done.")
@@ -357,7 +370,10 @@ def compute_energy(raw_d, init_params=None):
     n_params = 0
 
     if MIDDLEWARE == 'qibo':
-        if PRINTALL: print(" --- 2a) Constructing Qibo Hamiltonian and Ansatz ---")
+
+        #BEGIN qibo branch
+        if PRINTALL:
+            print(" --- 2a) Constructing Qibo Hamiltonian and Ansatz ---")
         hamiltonian = mol.hamiltonian()
 
         # Build Ansatz
@@ -378,8 +394,8 @@ def compute_energy(raw_d, init_params=None):
         if INITAMPLITUDES == "MP2" and ANSATZ == "UCCSD":
             init_params = np.asarray(circuit.get_parameters()).flatten()
 
-        if PRINTALL and not CircuitSavedQ:
-            CircuitSavedQ = True
+        if PRINTALL and not CircuitSummaryQ:
+            CircuitSummaryQ = True
             print(f"PRINTALL (compute_energy): Distance={distance:.4f} Bohr, Basis={BASIS}")
             param_gates = {gates.RY, gates.RZ, gates.RX}
 
@@ -396,7 +412,11 @@ def compute_energy(raw_d, init_params=None):
             print(circuit.summary())
             sys.stdout.flush()
 
+        #END qibo branch
+
     elif MIDDLEWARE == 'qiskit':
+
+        #BEGIN qiskit branch
         if PRINTALL: print(" --- 2a) Constructing Qiskit Hamiltonian and Ansatz ---")
 
         # --- Build Hamiltonian directly from qibochem integrals ---
@@ -428,8 +448,11 @@ def compute_energy(raw_d, init_params=None):
         n_params = uccsd_singlet_paramsize(n_so, n_elec)
 
         # --- Define Objective Function ---
+        sim = AerSimulator()
         estimator = LocalEstimator()
         def objective_qiskit(theta_vec):
+            global CircuitSummaryQ  # allow one-time summary toggle
+
             # Create the UCCSD circuit for the given theta parameters
             gen_ferm = _uccsd_singlet_generator_safe(theta_vec, n_so, n_elec)
             gen_ferm = 1j * gen_ferm  # Make Hermitian
@@ -437,26 +460,80 @@ def compute_energy(raw_d, init_params=None):
             H_theta = _qop_to_sparse_pauli_op(gen_qubit, n_so, reverse_qubit_order=True)
 
             # Build the full circuit: HF state + UCCSD evolution
-            qc = QuantumCircuit(n_so)
-            # Occupy the lowest energy orbitals for the HF state
+            circuit = QuantumCircuit(n_so) # This is the correct circuit to analyze
             for i in range(n_elec):
-                qc.x(i)
-            qc.append(PauliEvolutionGate(H_theta, time=1.0), qc.qubits)
+                circuit.x(i)
+            circuit.append(PauliEvolutionGate(H_theta, time=1.0), circuit.qubits)
+
+            # --- Qiskit circuit summary (Corrected to use 'circuit' instead of 'qc') ---
+            if PRINTALL and not CircuitSummaryQ:
+                # FIX 2: All references changed from 'qc' to 'circuit'
+                data = circuit.data
+                nqubits = circuit.num_qubits
+                n_single = sum(1 for ci in data if len(ci.qubits) == 1)
+                n_two    = sum(1 for ci in data if len(ci.qubits) == 2)
+                depth    = circuit.depth()
+                size     = circuit.size() if hasattr(circuit, "size") else len(data)
+                num_params = getattr(circuit, "num_parameters", len(circuit.parameters))
+
+                print("\n--- Circuit Summary (before transpilation) ---")
+                print(f"       Number of qubits             = {nqubits}")
+                print(f"       Number of circuit gates      = {n_single} single-qubit, {n_two} two-qubit")
+                print(f"       Circuit depth                = {depth}")
+                print(f"       Total operations (size)      = {size}")
+                print(f"       Number of circuit parameters = {num_params}")
+
+                sys.stdout.flush()
 
             # Transpile for the simulator
-            transpiled_qc = transpile(qc, backend=sim)
+            # NOTE: The 'sim' variable is defined in the global scope.
+            # It's better practice to pass it as an argument if this function were refactored.
+            transpiled_qc = transpile(circuit, backend=sim)
+
+            # --- Qiskit circuit summary and drawing ---
+            if PRINTALL and not CircuitSummaryQ:
+                CircuitSummaryQ = True # Ensure this block only runs once
+
+                # --- Summarize the HIGH-LEVEL circuit ---
+                print("--- High-Level Circuit Summary ---")
+                print(f"       Number of qubits: {circuit.num_qubits}")
+                print(f"       Gate counts: {circuit.count_ops()}")
+                print(f"       Depth: {circuit.depth()}")
+
+                # --- Summarize the TRANSPILED circuit (shows true complexity) ---
+                print("\n--- Transpiled Circuit Summary ---")
+                print(f"       Number of qubits: {transpiled_qc.num_qubits}")
+                print(f"       Gate counts: {transpiled_qc.count_ops()}")
+                print(f"       Depth: {transpiled_qc.depth()}")
+
+                # --- Draw and save the DETAILED TRANSPILED circuit ---
+                # Save as a PDF for a high-quality, zoomable image.
+                circuit_image_path = os.path.join(out_dir, f"qcqc_{PROJECT}_{timestamp}_vqe-circuit.pdf")
+                print(f"\n       Saving DETAILED transpiled circuit diagram to {circuit_image_path} ...")
+
+                # Draw the 'transpiled_qc' object.
+                # Use a larger 'fold' value and 'scale' to make it compact.
+                transpiled_qc.draw(
+                    output='mpl',
+                    style='clifford',
+                    fold=50,          # Adjust this value as needed
+                    scale=0.5,        # Adjust for size
+                    filename=circuit_image_path
+                )
+                print("       ... diagram saved.")
 
             # Calculate expectation value of the electronic part
-            pub = (transpiled_qc, H_electronic, []) # Use the electronic Hamiltonian
+            pub = (transpiled_qc, H_electronic, [])
             result = estimator.run([pub]).result()
 
-            # 3. Add the classical nuclear energy to the final quantum result
+            # Add nuclear repulsion (classical part)
             return result[0].data.evs + nuclear_repulsion
 
         vqe_objective = objective_qiskit
 
+        #END qiskit branch
 
-    # --- 3. Common VQE Optimization Loop ---
+    # --- 3. VQE: Classical optimization loop ---
     if PRINTALL: print(" --- 3) Preparing for classical optimization ---")
 
     # Define initial parameters
@@ -466,16 +543,17 @@ def compute_energy(raw_d, init_params=None):
         else: # "RAND"
             init_params = np.random.uniform(0, 2 * np.pi, n_params)
 
-    # Define callback for optimizer
+    # Define callback for classical optimizer
     callback = None
     if PRINTALL and abs(raw_d - xStart) < 1e-6:
-        iter_count = {'n': 0}
+        iter_count = 0
         def scipy_cb(xk):
-            iter_count['n'] += 1
+            nonlocal iter_count
+            iter_count += 1
             t0 = time.perf_counter()
             ek = vqe_objective(xk)
             dt = time.perf_counter() - t0
-            print(f"Iter {iter_count['n']:2d}: energy = {ek:.8f} Ha, eval_time = {dt:.3f} s")
+            print(f"Iter {iter_count:2d}: energy = {ek:.8f} Ha, eval_time = {dt:.3f} s")
             sys.stdout.flush()
         callback = scipy_cb
 
@@ -505,7 +583,7 @@ def compute_energy(raw_d, init_params=None):
     return scf_energy, best_energy, fci_energy, ccsd_t_energy, best_params
 
 # ========================================
-# ===== END MAIN COMPUATIONAL MODULE =====
+# ===== END MAIN COMPUTATIONAL MODULE =====
 # ========================================
 
 
